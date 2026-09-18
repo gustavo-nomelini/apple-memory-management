@@ -1,11 +1,11 @@
 #!/bin/bash
 
 ################################################################################
-# MONITOR DE BACKUP EM TEMPO REAL
-# Acompanhar progresso com estatísticas detalhadas
+# MONITOR DE BACKUP ICLOUD - VERSÃO CORRIGIDA
+# Monitora progresso do backup em tempo real
 ################################################################################
 
-set -euo pipefail
+set -uo pipefail
 
 # CORES
 RED='\033[0;31m'
@@ -13,41 +13,46 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
 NC='\033[0m'
 
+# ═══════════════════════════════════════════════════════════════
 # CONFIGURAÇÃO
+# ═══════════════════════════════════════════════════════════════
+
+# Carregar configuração se existir
+if [ -f "$HOME/.icloudpd_volume_config" ]; then
+    source "$HOME/.icloudpd_volume_config"
+fi
+
+# Valores padrão
 BACKUP_VOLUME="${BACKUP_VOLUME:-$HOME}"
 BACKUP_ROOT="${BACKUP_ROOT:-$BACKUP_VOLUME/icloud_backups}"
 DOWNLOAD_DIR="${BACKUP_ROOT}/downloads"
-UPDATE_INTERVAL=${1:-3}  # Segundos entre updates
 
-# HISTÓRICO
-declare -a FILE_HISTORY
-declare -a SIZE_HISTORY
-declare -a TIME_HISTORY
-
+# ═══════════════════════════════════════════════════════════════
 # FUNÇÕES
+# ═══════════════════════════════════════════════════════════════
+
 format_bytes() {
     local bytes=$1
-    if [ $bytes -lt 1024 ]; then
+    if [ "$bytes" -lt 1024 ]; then
         echo "${bytes}B"
-    elif [ $bytes -lt 1048576 ]; then
+    elif [ "$bytes" -lt 1048576 ]; then
         echo "$((bytes / 1024))KB"
-    elif [ $bytes -lt 1073741824 ]; then
+    elif [ "$bytes" -lt 1073741824 ]; then
         echo "$((bytes / 1048576))MB"
     else
-        echo "$((bytes / 1073741824))GB"
+        printf "%.2f GB" "$(echo "scale=2; $bytes / 1073741824" | bc)"
     fi
 }
 
 format_bytes_precise() {
     local bytes=$1
-    if [ $bytes -lt 1024 ]; then
+    if [ "$bytes" -lt 1024 ]; then
         printf "%.2f B" "$bytes"
-    elif [ $bytes -lt 1048576 ]; then
+    elif [ "$bytes" -lt 1048576 ]; then
         printf "%.2f KB" "$(echo "scale=2; $bytes / 1024" | bc)"
-    elif [ $bytes -lt 1073741824 ]; then
+    elif [ "$bytes" -lt 1073741824 ]; then
         printf "%.2f MB" "$(echo "scale=2; $bytes / 1048576" | bc)"
     else
         printf "%.2f GB" "$(echo "scale=2; $bytes / 1073741824" | bc)"
@@ -78,53 +83,8 @@ get_speed() {
     echo "${mb_per_sec} MB/s"
 }
 
-get_eta() {
-    local bytes_downloaded=$1
-    local speed_bytes=$2
-    local target_bytes=$3
-    
-    if [ $speed_bytes -eq 0 ]; then
-        echo "Calculando..."
-        return
-    fi
-    
-    local bytes_remaining=$((target_bytes - bytes_downloaded))
-    local seconds_remaining=$((bytes_remaining / speed_bytes))
-    
-    local hours=$((seconds_remaining / 3600))
-    local minutes=$(((seconds_remaining % 3600) / 60))
-    
-    printf "%02d:%02d" "$hours" "$minutes"
-}
-
-get_percentage() {
-    local current=$1
-    local total=$2
-    
-    if [ $total -eq 0 ]; then
-        echo "0"
-        return
-    fi
-    
-    echo "$((current * 100 / total))"
-}
-
-draw_progress_bar() {
-    local percentage=$1
-    local width=50
-    local filled=$((percentage * width / 100))
-    local empty=$((width - filled))
-    
-    printf "["
-    printf "%${filled}s" | tr ' ' '='
-    printf "%${empty}s" | tr ' ' '-'
-    printf "]"
-}
-
-# CABEÇALHO
 show_header() {
     clear
-    
     cat << 'EOF'
 ╔═══════════════════════════════════════════════════════════════╗
 ║  📊 MONITOR DE BACKUP ICLOUD EM TEMPO REAL                   ║
@@ -133,30 +93,35 @@ show_header() {
 EOF
 }
 
-# INFORMAÇÕES DO VOLUME
 show_volume_info() {
     echo -e "${CYAN}📁 VOLUME DE BACKUP${NC}"
     echo "─────────────────────────────────────────────────────"
     
-    local volume_name=$(basename "$BACKUP_VOLUME")
-    local total=$(df -h "$BACKUP_VOLUME" 2>/dev/null | awk 'NR==2 {print $2}')
-    local used=$(df -h "$BACKUP_VOLUME" 2>/dev/null | awk 'NR==2 {print $3}')
-    local available=$(df -h "$BACKUP_VOLUME" 2>/dev/null | awk 'NR==2 {print $4}')
-    
-    echo "Volume: ${MAGENTA}${volume_name}${NC}"
-    echo "Total: ${total} | Usado: ${used} | Disponível: ${available}"
-    echo ""
-}
-
-# ESTATÍSTICAS GERAIS
-show_statistics() {
-    if [ ! -d "$DOWNLOAD_DIR" ]; then
-        echo -e "${YELLOW}⚠  Pasta de download não encontrada${NC}"
+    if [ ! -d "$BACKUP_VOLUME" ]; then
+        echo -e "${RED}⚠️  Volume não encontrado: $BACKUP_VOLUME${NC}"
         return
     fi
     
+    local volume_name=$(basename "$BACKUP_VOLUME")
+    local total=$(df -h "$BACKUP_VOLUME" 2>/dev/null | awk 'NR==2 {print $2}' || echo "?")
+    local used=$(df -h "$BACKUP_VOLUME" 2>/dev/null | awk 'NR==2 {print $3}' || echo "?")
+    local available=$(df -h "$BACKUP_VOLUME" 2>/dev/null | awk 'NR==2 {print $4}' || echo "?")
+    
+    echo "Volume: ${CYAN}${volume_name}${NC}"
+    echo "Total: $total | Usado: $used | Disponível: $available"
+    echo ""
+}
+
+show_statistics() {
     echo -e "${CYAN}📊 ESTATÍSTICAS${NC}"
     echo "─────────────────────────────────────────────────────"
+    
+    if [ ! -d "$DOWNLOAD_DIR" ]; then
+        echo -e "${YELLOW}⚠️  Pasta de download não encontrada${NC}"
+        echo "   $DOWNLOAD_DIR"
+        echo ""
+        return
+    fi
     
     # Contar arquivos
     local file_count=$(find "$DOWNLOAD_DIR" -type f 2>/dev/null | wc -l)
@@ -169,10 +134,21 @@ show_statistics() {
     echo ""
 }
 
-# ARQUIVOS RECENTES
 show_recent_files() {
     echo -e "${CYAN}📄 ARQUIVOS RECENTES${NC}"
     echo "─────────────────────────────────────────────────────"
+    
+    if [ ! -d "$DOWNLOAD_DIR" ]; then
+        return
+    fi
+    
+    local count=$(find "$DOWNLOAD_DIR" -type f -printf '%T@ %s %p\n' 2>/dev/null | wc -l)
+    
+    if [ "$count" -eq 0 ]; then
+        echo -e "${YELLOW}Nenhum arquivo ainda${NC}"
+        echo ""
+        return
+    fi
     
     find "$DOWNLOAD_DIR" -type f -printf '%T@ %s %p\n' 2>/dev/null | \
         sort -rn | head -10 | while read -r timestamp size path; do
@@ -188,23 +164,31 @@ show_recent_files() {
     echo ""
 }
 
-# TIPOS DE ARQUIVO
 show_file_types() {
     echo -e "${CYAN}🎨 TIPOS DE ARQUIVO${NC}"
     echo "─────────────────────────────────────────────────────"
     
+    if [ ! -d "$DOWNLOAD_DIR" ]; then
+        return
+    fi
+    
+    local count=$(find "$DOWNLOAD_DIR" -type f 2>/dev/null | wc -l)
+    
+    if [ "$count" -eq 0 ]; then
+        echo -e "${YELLOW}Nenhum arquivo${NC}"
+        echo ""
+        return
+    fi
+    
     find "$DOWNLOAD_DIR" -type f 2>/dev/null | \
         sed 's/.*\.//' | sort | uniq -c | sort -rn | head -10 | \
         while read -r count ext; do
-            local bar_width=$((count / 5))
-            printf "  ${MAGENTA}%-8s${NC} %3d  " "$ext" "$count"
-            printf "%${bar_width}s\n" | tr ' ' '█'
+            printf "  ${MAGENTA}%-8s${NC} %3d arquivos\n" "$ext" "$count"
         done
     
     echo ""
 }
 
-# MONITORAR PROGRESSO
 monitor_progress() {
     local start_time=$(date +%s)
     local last_size=0
@@ -215,8 +199,8 @@ monitor_progress() {
         show_volume_info
         
         if [ ! -d "$DOWNLOAD_DIR" ]; then
-            echo -e "${YELLOW}⚠  Aguardando início do backup...${NC}"
-            sleep "$UPDATE_INTERVAL"
+            echo -e "${YELLOW}⚠️  Aguardando início do backup...${NC}"
+            sleep 3
             continue
         fi
         
@@ -249,19 +233,22 @@ monitor_progress() {
         
         # Indicador de atividade
         if [ $size_diff -gt 0 ]; then
-            echo -e "${GREEN}✓ Transferência ativa (${size_diff} bytes/s)${NC}"
+            echo -e "${GREEN}✓ Transferência ativa ($(format_bytes $size_diff)/s)${NC}"
         else
             echo -e "${YELLOW}⊙ Aguardando dados...${NC}"
         fi
         
+        echo ""
+        echo -e "${CYAN}Atualizando em 3 segundos... (Ctrl+C para sair)${NC}"
+        echo ""
+        
         last_size=$current_size
         last_time=$current_time
         
-        sleep "$UPDATE_INTERVAL"
+        sleep 3
     done
 }
 
-# MODO SUMÁRIO
 show_summary_mode() {
     echo ""
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
@@ -271,6 +258,7 @@ show_summary_mode() {
     
     if [ ! -d "$DOWNLOAD_DIR" ]; then
         echo -e "${RED}Nenhum backup encontrado${NC}"
+        echo "Esperando: $DOWNLOAD_DIR"
         return
     fi
     
@@ -306,17 +294,21 @@ show_summary_mode() {
     echo ""
 }
 
-# VALIDAR INTEGRIDADE
 validate_files() {
     echo ""
     echo -e "${CYAN}🔍 VALIDANDO INTEGRIDADE${NC}"
     echo "─────────────────────────────────────────────────────"
     
-    local total=$(find "$DOWNLOAD_DIR" -type f | wc -l)
+    if [ ! -d "$DOWNLOAD_DIR" ]; then
+        echo -e "${RED}Diretório não encontrado${NC}"
+        return
+    fi
+    
+    local total=$(find "$DOWNLOAD_DIR" -type f 2>/dev/null | wc -l)
     local count=0
     local errors=0
     
-    find "$DOWNLOAD_DIR" -type f | while read -r file; do
+    find "$DOWNLOAD_DIR" -type f 2>/dev/null | while read -r file; do
         count=$((count + 1))
         
         if [ ! -r "$file" ]; then
@@ -330,10 +322,9 @@ validate_files() {
     done
     
     echo ""
-    echo -e "${GREEN}✓ Validação completa${NC}"
+    echo -e "${GREEN}✓ Validação concluída${NC}"
 }
 
-# MENU
 show_menu() {
     cat << 'EOF'
 
@@ -341,8 +332,7 @@ Opções:
   1) Monitorar em tempo real
   2) Ver sumário
   3) Validar integridade
-  4) Limpar logs
-  5) Sair
+  4) Sair
 
 EOF
     
@@ -352,13 +342,15 @@ EOF
         1) monitor_progress;;
         2) show_summary_mode;;
         3) validate_files;;
-        4) rm -rf "$BACKUP_ROOT/logs/"*; echo "Logs limpos";;
-        5) exit 0;;
+        4) exit 0;;
         *) echo "Opção inválida";;
     esac
 }
 
+# ═══════════════════════════════════════════════════════════════
 # MAIN
+# ═══════════════════════════════════════════════════════════════
+
 main() {
     if [ $# -eq 0 ]; then
         monitor_progress
@@ -378,7 +370,8 @@ Opções:
 Exemplos:
   ./backup_monitor.sh                    # Tempo real
   ./backup_monitor.sh --summary          # Sumário
-  BACKUP_ROOT=/Volumes/disco ./backup_monitor.sh  # Disco customizado
+  BACKUP_ROOT=/Volumes/disco ./backup_monitor.sh
+
 EOF
             ;;
             *) monitor_progress;;
