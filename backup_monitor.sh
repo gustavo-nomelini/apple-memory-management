@@ -1,67 +1,73 @@
 #!/bin/bash
 
 ################################################################################
-# MONITOR DE BACKUP ICLOUD - TEMPO REAL (SEM BUGS)
-# Loop contínuo, calcula velocidade, sem variáveis undefined
+# MONITOR DE BACKUP ICLOUD - VERSÃO CORRIGIDA
+# Monitora progresso do backup em tempo real
 ################################################################################
 
 set -uo pipefail
 
-# CORES (sem variáveis estranhas)
+# CORES
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 NC='\033[0m'
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURAÇÃO
 # ═══════════════════════════════════════════════════════════════
 
+# Carregar configuração se existir
 if [ -f "$HOME/.icloudpd_volume_config" ]; then
     source "$HOME/.icloudpd_volume_config"
 fi
 
+# Valores padrão
 BACKUP_VOLUME="${BACKUP_VOLUME:-$HOME}"
 BACKUP_ROOT="${BACKUP_ROOT:-$BACKUP_VOLUME/icloud_backups}"
-DOWNLOAD_DIR="${BACKUP_ROOT}/downloads"
-
-# Variáveis de tempo
-START_TIME=$(date +%s)
-LAST_SIZE=0
-LAST_TIME=$START_TIME
+DOWNLOAD_DIR="${DOWNLOAD_DIR:-$BACKUP_ROOT/media}"
 
 # ═══════════════════════════════════════════════════════════════
-# FUNÇÕES SIMPLES (SEM bc, SEM VARIÁVEIS UNDEFINED)
+# FUNÇÕES
 # ═══════════════════════════════════════════════════════════════
 
 format_bytes() {
     local bytes=$1
-    
-    # Evitar divisão por zero
-    if [ "$bytes" -eq 0 ]; then
-        echo "0.00 B"
-        return
-    fi
-    
-    # Usar awk ao invés de bc
     if [ "$bytes" -lt 1024 ]; then
         echo "${bytes}B"
     elif [ "$bytes" -lt 1048576 ]; then
-        awk "BEGIN {printf \"%.2f KB\", $bytes / 1024}"
+        echo "$((bytes / 1024))KB"
     elif [ "$bytes" -lt 1073741824 ]; then
-        awk "BEGIN {printf \"%.2f MB\", $bytes / 1048576}"
+        echo "$((bytes / 1048576))MB"
     else
-        awk "BEGIN {printf \"%.2f GB\", $bytes / 1073741824}"
+        awk -v bytes="$bytes" 'BEGIN { printf "%.2f GB", bytes / 1073741824 }'
     fi
 }
 
-get_elapsed() {
-    local elapsed=$(($(date +%s) - START_TIME))
+format_bytes_precise() {
+    local bytes=$1
+    if [ "$bytes" -lt 1024 ]; then
+        printf "%.2f B" "$bytes"
+    elif [ "$bytes" -lt 1048576 ]; then
+        awk -v bytes="$bytes" 'BEGIN { printf "%.2f KB", bytes / 1024 }'
+    elif [ "$bytes" -lt 1073741824 ]; then
+        awk -v bytes="$bytes" 'BEGIN { printf "%.2f MB", bytes / 1048576 }'
+    else
+        awk -v bytes="$bytes" 'BEGIN { printf "%.2f GB", bytes / 1073741824 }'
+    fi
+}
+
+get_elapsed_time() {
+    local start=$1
+    local elapsed=$(($(date +%s) - start))
+    
     local hours=$((elapsed / 3600))
     local minutes=$(((elapsed % 3600) / 60))
     local seconds=$((elapsed % 60))
+    
     printf "%02d:%02d:%02d" "$hours" "$minutes" "$seconds"
 }
 
@@ -70,263 +76,320 @@ get_speed() {
     local seconds=$2
     
     if [ $seconds -eq 0 ]; then
-        echo "0.00 MB/s"
+        echo "0 MB/s"
         return
     fi
     
-    # Calcular MB/s com awk
-    awk "BEGIN {printf \"%.2f MB/s\", ($bytes / 1048576) / $seconds}"
+    awk -v bytes="$bytes" -v seconds="$seconds" 'BEGIN { printf "%.2f MB/s\n", (bytes / 1048576) / seconds }'
 }
 
-# ═══════════════════════════════════════════════════════════════
-# MAIN - MONITOR EM TEMPO REAL
-# ═══════════════════════════════════════════════════════════════
+show_header() {
+    clear 2>/dev/null || true
+    cat << 'EOF'
+╔═══════════════════════════════════════════════════════════════╗
+║  📊 MONITOR DE BACKUP ICLOUD EM TEMPO REAL                   ║
+╚═══════════════════════════════════════════════════════════════╝
 
-monitor_realtime() {
-    # Verificar se diretório existe
-    if [ ! -d "$DOWNLOAD_DIR" ]; then
-        echo ""
-        echo "╔═══════════════════════════════════════════════════════════════╗"
-        echo "║  📊 MONITOR DE BACKUP ICLOUD                                ║"
-        echo "╚═══════════════════════════════════════════════════════════════╝"
-        echo ""
-        echo -e "${YELLOW}⚠️  Aguardando início do backup...${NC}"
-        echo ""
-        echo "Caminho: $DOWNLOAD_DIR"
-        echo ""
-        echo -e "${CYAN}(Pressione Ctrl+C para sair)${NC}"
-        echo ""
-        exit 1
-    fi
-    
-    # Loop contínuo
-    while true; do
-        clear
-        
-        # ═══════════════════════════════════════════════════════════
-        # HEADER
-        # ═══════════════════════════════════════════════════════════
-        
-        echo ""
-        echo "╔═══════════════════════════════════════════════════════════════╗"
-        echo "║  📊 MONITOR DE BACKUP ICLOUD EM TEMPO REAL                   ║"
-        echo "╚═══════════════════════════════════════════════════════════════╝"
-        echo ""
-        
-        # ═══════════════════════════════════════════════════════════
-        # VOLUME INFO
-        # ═══════════════════════════════════════════════════════════
-        
-        echo -e "${CYAN}📁 VOLUME DE BACKUP${NC}"
-        echo "─────────────────────────────────────────────────────"
-        
-        local vol_name=$(basename "$BACKUP_VOLUME")
-        local total_space=$(df -h "$BACKUP_VOLUME" 2>/dev/null | awk 'NR==2 {print $2}' || echo "?")
-        local used_space=$(df -h "$BACKUP_VOLUME" 2>/dev/null | awk 'NR==2 {print $3}' || echo "?")
-        local avail_space=$(df -h "$BACKUP_VOLUME" 2>/dev/null | awk 'NR==2 {print $4}' || echo "?")
-        
-        echo "Volume: ${CYAN}${vol_name}${NC}"
-        echo "Total: $total_space | Usado: $used_space | Disponível: $avail_space"
-        echo ""
-        
-        # ═══════════════════════════════════════════════════════════
-        # ESTATÍSTICAS
-        # ═══════════════════════════════════════════════════════════
-        
-        local file_count=$(find "$DOWNLOAD_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
-        local dir_count=$(find "$DOWNLOAD_DIR" -type d 2>/dev/null | wc -l | tr -d ' ')
-        local total_bytes=$(du -sb "$DOWNLOAD_DIR" 2>/dev/null | awk '{print $1}' | tr -d ' ')
-        
-        if [ -z "$total_bytes" ]; then
-            total_bytes=0
-        fi
-        if [ -z "$file_count" ]; then
-            file_count=0
-        fi
-        if [ -z "$dir_count" ]; then
-            dir_count=0
-        fi
-        
-        echo -e "${CYAN}📊 ESTATÍSTICAS${NC}"
-        echo "─────────────────────────────────────────────────────"
-        echo "Arquivos: ${GREEN}${file_count}${NC}"
-        echo "Diretórios: ${GREEN}${dir_count}${NC}"
-        echo "Tamanho Total: ${GREEN}$(format_bytes "$total_bytes")${NC}"
-        echo ""
-        
-        # ═══════════════════════════════════════════════════════════
-        # TEMPO E VELOCIDADE
-        # ═══════════════════════════════════════════════════════════
-        
-        local current_time=$(date +%s)
-        local elapsed=$((current_time - START_TIME))
-        local time_diff=$((current_time - LAST_TIME))
-        local size_diff=$((total_bytes - LAST_SIZE))
-        
-        local speed=$(get_speed "$total_bytes" "$elapsed")
-        local current_speed=$(get_speed "$size_diff" "$time_diff")
-        
-        echo -e "${CYAN}⏱️  TEMPO E VELOCIDADE${NC}"
-        echo "─────────────────────────────────────────────────────"
-        echo "Tempo decorrido: ${YELLOW}$(get_elapsed)${NC}"
-        echo "Velocidade média: ${YELLOW}${speed}${NC}"
-        echo "Velocidade atual: ${YELLOW}${current_speed}${NC}"
-        echo "Tamanho atual: ${GREEN}$(format_bytes "$total_bytes")${NC}"
-        echo ""
-        
-        # ═══════════════════════════════════════════════════════════
-        # ÚLTIMOS ARQUIVOS
-        # ═══════════════════════════════════════════════════════════
-        
-        echo -e "${CYAN}📄 ÚLTIMOS ARQUIVOS (últimos 5)${NC}"
-        echo "─────────────────────────────────────────────────────"
-        
-        if [ "$file_count" -eq 0 ]; then
-            echo -e "${YELLOW}Aguardando dados...${NC}"
-        else
-            find "$DOWNLOAD_DIR" -type f -printf '%T@ %s %p\n' 2>/dev/null | \
-                sort -rn | head -5 | while read -r timestamp size path; do
-                
-                local date=$(date -r "${timestamp%.*}" '+%H:%M:%S' 2>/dev/null || echo "??:??:??")
-                local size_fmt=$(format_bytes "$size")
-                local filename=$(basename "$path")
-                
-                printf "  ${GREEN}%-10s${NC} | ${YELLOW}%12s${NC} | %s\n" "$date" "$size_fmt" "$filename"
-            done
-        fi
-        
-        echo ""
-        
-        # ═══════════════════════════════════════════════════════════
-        # TIPOS DE ARQUIVO
-        # ═══════════════════════════════════════════════════════════
-        
-        echo -e "${CYAN}🎨 TIPOS DE ARQUIVO (top 8)${NC}"
-        echo "─────────────────────────────────────────────────────"
-        
-        if [ "$file_count" -eq 0 ]; then
-            echo -e "${YELLOW}Nenhum arquivo${NC}"
-        else
-            find "$DOWNLOAD_DIR" -type f 2>/dev/null | \
-                sed 's/.*\.//' | sort | uniq -c | sort -rn | head -8 | \
-                while read -r count ext; do
-                    count=$(echo "$count" | tr -d ' ')
-                    printf "  %-8s | %4d arquivos\n" "$ext" "$count"
-                done
-        fi
-        
-        echo ""
-        
-        # ═══════════════════════════════════════════════════════════
-        # STATUS
-        # ═══════════════════════════════════════════════════════════
-        
-        if [ "$size_diff" -gt 0 ]; then
-            echo -e "${GREEN}✓ Transferência ativa (+$(format_bytes "$size_diff")/s)${NC}"
-        else
-            echo -e "${YELLOW}⊙ Aguardando dados...${NC}"
-        fi
-        
-        echo ""
-        echo -e "${BLUE}Atualizando em 2 segundos... (${CYAN}Ctrl+C${BLUE} para sair)${NC}"
-        echo ""
-        
-        # Atualizar variáveis
-        LAST_SIZE=$total_bytes
-        LAST_TIME=$current_time
-        
-        # Aguardar
-        sleep 2
-    done
+EOF
 }
 
-# ═══════════════════════════════════════════════════════════════
-# MODO SUMÁRIO (sem loop)
-# ═══════════════════════════════════════════════════════════════
-
-show_summary() {
-    if [ ! -d "$DOWNLOAD_DIR" ]; then
-        echo -e "${RED}Nenhum backup encontrado${NC}"
-        exit 1
-    fi
-    
-    clear
-    
-    echo ""
-    echo "╔═══════════════════════════════════════════════════════════════╗"
-    echo "║  📊 SUMÁRIO DE BACKUP                                       ║"
-    echo "╚═══════════════════════════════════════════════════════════════╝"
-    echo ""
-    
-    # Estatísticas
-    local file_count=$(find "$DOWNLOAD_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
-    local total_bytes=$(du -sb "$DOWNLOAD_DIR" 2>/dev/null | awk '{print $1}' | tr -d ' ')
-    
-    echo -e "${CYAN}📊 ESTATÍSTICAS${NC}"
-    echo "Arquivos: ${GREEN}${file_count}${NC}"
-    echo "Tamanho: ${GREEN}$(format_bytes "$total_bytes")${NC}"
-    echo ""
-    
-    # Últimos arquivos
-    echo -e "${CYAN}📄 ÚLTIMOS 10 ARQUIVOS${NC}"
+show_volume_info() {
+    echo -e "${CYAN}📁 VOLUME DE BACKUP${NC}"
     echo "─────────────────────────────────────────────────────"
     
-    find "$DOWNLOAD_DIR" -type f -printf '%T@ %s %p\n' 2>/dev/null | \
+    if [ ! -d "$BACKUP_VOLUME" ]; then
+        echo -e "${RED}⚠️  Volume não encontrado: $BACKUP_VOLUME${NC}"
+        return
+    fi
+    
+    local volume_name=$(basename "$BACKUP_VOLUME")
+    local total=$(df -h "$BACKUP_VOLUME" 2>/dev/null | awk 'NR==2 {print $2}' || echo "?")
+    local used=$(df -h "$BACKUP_VOLUME" 2>/dev/null | awk 'NR==2 {print $3}' || echo "?")
+    local available=$(df -h "$BACKUP_VOLUME" 2>/dev/null | awk 'NR==2 {print $4}' || echo "?")
+    
+    echo "Volume: ${CYAN}${volume_name}${NC}"
+    echo "Total: $total | Usado: $used | Disponível: $available"
+    echo ""
+}
+
+show_statistics() {
+    echo -e "${CYAN}📊 ESTATÍSTICAS${NC}"
+    echo "─────────────────────────────────────────────────────"
+    
+    if [ ! -d "$DOWNLOAD_DIR" ]; then
+        echo -e "${YELLOW}⚠️  Pasta de download não encontrada${NC}"
+        echo "   $DOWNLOAD_DIR"
+        echo ""
+        return
+    fi
+    
+    # Contar arquivos
+    local file_count=$(find "$DOWNLOAD_DIR" -type f 2>/dev/null | wc -l)
+    local dir_count=$(find "$DOWNLOAD_DIR" -type d 2>/dev/null | wc -l)
+    local total_size_kb=$(du -sk "$DOWNLOAD_DIR" 2>/dev/null | awk '{print $1}' || echo "0")
+    local total_size=$(( ${total_size_kb:-0} * 1024 ))
+    
+    printf "Arquivos: ${GREEN}%s${NC}\n" "$file_count"
+    printf "Diretórios: ${GREEN}%s${NC}\n" "$dir_count"
+    printf "Tamanho Total: ${GREEN}%s${NC}\n" "$(format_bytes_precise "$total_size")"
+    echo ""
+}
+
+show_recent_files() {
+    echo -e "${CYAN}📄 ARQUIVOS RECENTES${NC}"
+    echo "─────────────────────────────────────────────────────"
+    
+    if [ ! -d "$DOWNLOAD_DIR" ]; then
+        return
+    fi
+    
+    local count=$(find "$DOWNLOAD_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
+    
+    if [ "$count" -eq 0 ]; then
+        echo -e "${YELLOW}Nenhum arquivo ainda${NC}"
+        echo ""
+        return
+    fi
+    
+    find "$DOWNLOAD_DIR" -type f -exec stat -f '%m %z %N' {} + 2>/dev/null | \
         sort -rn | head -10 | while read -r timestamp size path; do
         
-        local date=$(date -r "${timestamp%.*}" '+%Y-%m-%d %H:%M' 2>/dev/null)
-        local size_fmt=$(format_bytes "$size")
+        # Converter timestamp
+        local date=$(date -r "${timestamp%.*}" '+%H:%M:%S' 2>/dev/null || echo "??:??:??")
+        local size_formatted=$(format_bytes "$size")
         local filename=$(basename "$path")
         
-        printf "%-16s | %12s | %s\n" "$date" "$size_fmt" "$filename"
+        printf "  ${GREEN}%s${NC} | ${YELLOW}%8s${NC} | %s\n" "$date" "$size_formatted" "$filename"
     done
     
     echo ""
-    
-    # Tipos
+}
+
+show_file_types() {
     echo -e "${CYAN}🎨 TIPOS DE ARQUIVO${NC}"
     echo "─────────────────────────────────────────────────────"
     
-    find "$DOWNLOAD_DIR" -type f 2>/dev/null | \
-        sed 's/.*\.//' | sort | uniq -c | sort -rn | head -15 | \
+    if [ ! -d "$DOWNLOAD_DIR" ]; then
+        return
+    fi
+    
+    local count=$(find "$DOWNLOAD_DIR" -type f 2>/dev/null | wc -l)
+    
+    if [ "$count" -eq 0 ]; then
+        echo -e "${YELLOW}Nenhum arquivo${NC}"
+        echo ""
+        return
+    fi
+    
+    find "$DOWNLOAD_DIR" -type f -print 2>/dev/null | while IFS= read -r file; do
+        filename=$(basename "$file")
+        extension="${filename##*.}"
+        if [ "$extension" = "$filename" ]; then
+            extension="[sem extensão]"
+        fi
+        printf '%s\n' "$extension"
+    done | sort | uniq -c | sort -rn | head -10 | \
         while read -r count ext; do
-            count=$(echo "$count" | tr -d ' ')
-            printf "%-8s | %4d arquivos\n" "$ext" "$count"
+            printf "  ${MAGENTA}%-14s${NC} %3d arquivos\n" "$ext" "$count"
         done
     
     echo ""
 }
 
+monitor_progress() {
+    local start_time=$(date +%s)
+    local last_size=0
+    local last_time=$start_time
+    
+    while true; do
+        show_header
+        show_volume_info
+        
+        if [ ! -d "$DOWNLOAD_DIR" ]; then
+            echo -e "${YELLOW}⚠️  Aguardando início do backup...${NC}"
+            sleep 3
+            continue
+        fi
+        
+        local current_time=$(date +%s)
+        local current_size_kb=$(du -sk "$DOWNLOAD_DIR" 2>/dev/null | awk '{print $1}' || echo "0")
+        local current_size=$(( ${current_size_kb:-0} * 1024 ))
+        local time_diff=$((current_time - last_time))
+        local size_diff=$((current_size - last_size))
+        
+        # Calcular velocidade
+        local speed_bytes=0
+        if [ $time_diff -gt 0 ]; then
+            speed_bytes=$((size_diff / time_diff))
+        fi
+        
+        local elapsed=$(get_elapsed_time "$start_time")
+        local speed=$(get_speed "$current_size" "$((current_time - start_time))")
+        
+        show_statistics
+        
+        # Barra de progresso (simulada com tempo decorrido)
+        echo -e "${CYAN}⏱️  TEMPO E VELOCIDADE${NC}"
+        echo "─────────────────────────────────────────────────────"
+        printf "Tempo decorrido: ${YELLOW}%s${NC}\n" "$elapsed"
+        printf "Velocidade média: ${YELLOW}%s${NC}\n" "$speed"
+        printf "Tamanho atual: ${GREEN}%s${NC}\n" "$(format_bytes_precise "$current_size")"
+        echo ""
+        
+        show_recent_files
+        show_file_types
+        
+        # Indicador de atividade
+        if [ $size_diff -gt 0 ]; then
+            echo -e "${GREEN}✓ Transferência ativa ($(format_bytes $size_diff)/s)${NC}"
+        else
+            echo -e "${YELLOW}⊙ Aguardando dados...${NC}"
+        fi
+        
+        echo ""
+        echo -e "${CYAN}Atualizando em 3 segundos... (Ctrl+C para sair)${NC}"
+        echo ""
+        
+        last_size=$current_size
+        last_time=$current_time
+        
+        sleep 3
+    done
+}
+
+show_summary_mode() {
+    echo ""
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}                    SUMÁRIO DE BACKUP${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    if [ ! -d "$DOWNLOAD_DIR" ]; then
+        echo -e "${RED}Nenhum backup encontrado${NC}"
+        echo "Esperando: $DOWNLOAD_DIR"
+        return
+    fi
+    
+    show_statistics
+    
+    echo -e "${CYAN}📋 ÚLTIMOS 20 ARQUIVOS${NC}"
+    echo "─────────────────────────────────────────────────────"
+    
+    find "$DOWNLOAD_DIR" -type f -exec stat -f '%m %z %N' {} + 2>/dev/null | \
+        sort -rn | head -20 | while read -r timestamp size path; do
+        
+        local date=$(date -r "${timestamp%.*}" '+%Y-%m-%d %H:%M' 2>/dev/null)
+        local size_formatted=$(format_bytes "$size")
+        local filename=$(basename "$path")
+        
+        printf "%-16s | %8s | %s\n" "$date" "$size_formatted" "$filename"
+    done
+    
+    echo ""
+    echo -e "${CYAN}📊 DISTRIBUIÇÃO DE TIPOS${NC}"
+    echo "─────────────────────────────────────────────────────"
+    
+    show_file_types
+    
+    echo -e "${CYAN}📁 DIRETÓRIOS PRINCIPAIS${NC}"
+    echo "─────────────────────────────────────────────────────"
+    
+    du -sh "$DOWNLOAD_DIR"/*/ 2>/dev/null | sort -rh | head -10 | \
+        while read -r size dir; do
+            printf "%-8s | %s\n" "$size" "$(basename "$dir")"
+        done
+    
+    echo ""
+}
+
+validate_files() {
+    echo ""
+    echo -e "${CYAN}🔍 VALIDANDO INTEGRIDADE${NC}"
+    echo "─────────────────────────────────────────────────────"
+    
+    if [ ! -d "$DOWNLOAD_DIR" ]; then
+        echo -e "${RED}Diretório não encontrado${NC}"
+        return
+    fi
+    
+    local total=$(find "$DOWNLOAD_DIR" -type f 2>/dev/null | wc -l)
+    local count=0
+    local errors=0
+
+    while IFS= read -r file; do
+        count=$((count + 1))
+
+        if [ ! -r "$file" ]; then
+            echo -e "${RED}✗ Erro de acesso: $file${NC}"
+            errors=$((errors + 1))
+        fi
+        
+        if [ $((count % 100)) -eq 0 ]; then
+            echo -ne "\rValidados: $count/$total"
+        fi
+    done < <(find "$DOWNLOAD_DIR" -type f -print 2>/dev/null)
+    
+    echo ""
+    if [ "$errors" -eq 0 ]; then
+        echo -e "${GREEN}✓ Validação concluída: $count arquivos${NC}"
+    else
+        echo -e "${RED}✗ Validação concluída com $errors erro(s)${NC}"
+        return 1
+    fi
+}
+
+show_menu() {
+    cat << 'EOF'
+
+Opções:
+  1) Monitorar em tempo real
+  2) Ver sumário
+  3) Validar integridade
+  4) Sair
+
+EOF
+    
+    read -p "Opção: " choice
+    
+    case $choice in
+        1) monitor_progress;;
+        2) show_summary_mode;;
+        3) validate_files;;
+        4) exit 0;;
+        *) echo "Opção inválida";;
+    esac
+}
+
 # ═══════════════════════════════════════════════════════════════
-# ENTRADA
+# MAIN
 # ═══════════════════════════════════════════════════════════════
 
-case "${1:-}" in
-    --summary)
-        show_summary
-        ;;
-    --help)
-        cat << 'EOFHELP'
-Monitor de Backup do iCloud
+main() {
+    if [ $# -eq 0 ]; then
+        monitor_progress
+    else
+        case "$1" in
+            --summary) show_summary_mode;;
+            --validate) validate_files;;
+            --help) cat << 'EOF'
+Uso: backup_monitor.sh [OPÇÃO]
 
-Uso:
-  ./backup_monitor.sh              # Tempo real (atualiza a cada 2s)
-  ./backup_monitor.sh --summary    # Sumário (uma única vez)
-  ./backup_monitor.sh --help       # Esta ajuda
+Opções:
+  (sem opção)  Monitorar em tempo real
+  --summary    Mostrar sumário
+  --validate   Validar integridade
+  --help       Mostrar esta ajuda
 
 Exemplos:
-  # Monitorar em tempo real
-  ./backup_monitor.sh
+  ./backup_monitor.sh                    # Tempo real
+  ./backup_monitor.sh --summary          # Sumário
+  BACKUP_ROOT=/Volumes/disco ./backup_monitor.sh
 
-  # Ver sumário rápido
-  ./backup_monitor.sh --summary
+EOF
+            ;;
+            *) monitor_progress;;
+        esac
+    fi
+}
 
-  # Com volume customizado
-  BACKUP_ROOT=/Volumes/SSD1TB/icloud_backups ./backup_monitor.sh
-
-EOFHELP
-        ;;
-    *)
-        monitor_realtime
-        ;;
-esac
+main "$@"

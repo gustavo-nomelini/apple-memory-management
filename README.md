@@ -14,6 +14,7 @@ Este sistema automatiza completamente o backup de fotos e vídeos do iCloud para
 
 ## 📋 Pré-requisitos
 
+
 ### Sistema Operacional
 - macOS, Linux ou WSL2 (Windows)
 - Bash 4.0+
